@@ -1,353 +1,291 @@
-import os
-import json
-import requests
-from typing import List, Dict, Union, Optional
-import mimetypes
+"""
+Google Cloud Storage Utility Functions
 
-def list_bucket_contents(bucket_name: str, token: str, prefix: str = None) -> List[Dict]:
+This module provides utility functions for common Google Cloud Storage operations
+using bearer token authentication.
+"""
+
+from google.cloud import storage
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+import os
+import glob
+from typing import List, Optional, Union
+
+
+def get_client_with_token(token: str) -> storage.Client:
     """
-    List all contents of the bucket with optional prefix.
+    Create a Google Cloud Storage client using bearer token authentication.
     
     Args:
-        bucket_name: Name of the GCS bucket
-        token: Bearer token for authentication
-        prefix: Optional prefix to filter objects (simulate folder)
+        token: The bearer token for authentication
         
     Returns:
-        List of objects in the bucket
+        A Google Cloud Storage client
     """
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-    
-    base_url = f"https://storage.googleapis.com/storage/v1/b/{bucket_name}"
-    
-    params = {}
-    if prefix:
-        params["prefix"] = prefix
-    
-    response = requests.get(
-        f"{base_url}/o", 
-        headers=headers,
-        params=params
-    )
-    
-    if response.status_code == 200:
-        result = response.json()
-        return result.get("items", [])
-    else:
-        raise Exception(f"Failed to list bucket contents: {response.text}")
+    credentials = Credentials(token=token)
+    return storage.Client(credentials=credentials)
 
-def list_folder_contents(bucket_name: str, token: str, folder_path: str) -> List[Dict]:
+
+def list_bucket_contents(token: str, bucket_name: str, prefix: str = None) -> List[str]:
+    """
+    List all objects in a bucket, optionally filtered by a prefix.
+    
+    Args:
+        token: The bearer token for authentication
+        bucket_name: Name of the bucket
+        prefix: Optional prefix to filter objects (e.g., folder path)
+        
+    Returns:
+        List of object names in the bucket
+    """
+    client = get_client_with_token(token)
+    bucket = client.bucket(bucket_name)
+    blobs = client.list_blobs(bucket, prefix=prefix)
+    
+    return [blob.name for blob in blobs]
+
+
+def list_folder_contents(token: str, bucket_name: str, folder_path: str) -> List[str]:
     """
     List contents of a specific folder in the bucket.
     
     Args:
-        bucket_name: Name of the GCS bucket
-        token: Bearer token for authentication
-        folder_path: Path to the folder (must end with a /)
+        token: The bearer token for authentication
+        bucket_name: Name of the bucket
+        folder_path: Path to the folder (e.g., 'my-folder/' or 'my-folder/subfolder/')
         
     Returns:
-        List of objects in the specified folder
+        List of object names in the folder
     """
-    # Ensure folder path ends with /
+    # Ensure folder path ends with a slash
     if not folder_path.endswith('/'):
         folder_path += '/'
-        
-    return list_bucket_contents(bucket_name, token, prefix=folder_path)
+    
+    return list_bucket_contents(token, bucket_name, folder_path)
 
-def create_folder(bucket_name: str, token: str, folder_path: str) -> Dict:
+
+def create_folder(token: str, bucket_name: str, folder_path: str) -> bool:
     """
-    Create a new folder in the bucket.
-    GCS doesn't have actual folders, so this creates a zero-byte object ending with /
+    Create a folder in the bucket. In GCS, folders are virtual and created by 
+    creating an empty object with a name ending in '/'.
     
     Args:
-        bucket_name: Name of the GCS bucket
-        token: Bearer token for authentication
-        folder_path: Path of the folder to create (must end with a /)
+        token: The bearer token for authentication
+        bucket_name: Name of the bucket
+        folder_path: Path to the folder to create (e.g., 'my-folder/' or 'my-folder/subfolder/')
         
     Returns:
-        Response from the GCS API
+        True if successful
     """
-    # Ensure folder path ends with /
+    client = get_client_with_token(token)
+    bucket = client.bucket(bucket_name)
+    
+    # Ensure folder path ends with a slash
     if not folder_path.endswith('/'):
         folder_path += '/'
-        
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/octet-stream",
-        "Content-Length": "0"
-    }
     
-    upload_url = f"https://storage.googleapis.com/upload/storage/v1/b/{bucket_name}"
+    # Create an empty object with the folder path as its name
+    blob = bucket.blob(folder_path)
+    blob.upload_from_string('')
     
-    response = requests.post(
-        f"{upload_url}/o",
-        headers=headers,
-        params={
-            "uploadType": "media",
-            "name": folder_path
-        },
-        data=""
-    )
-    
-    if response.status_code in [200, 201]:
-        return response.json()
-    else:
-        raise Exception(f"Failed to create folder: {response.text}")
+    return True
 
-def upload_file(bucket_name: str, token: str, local_file_path: str, gcs_file_path: str) -> Dict:
+
+def upload_file(token: str, bucket_name: str, source_file_path: str, 
+                destination_blob_name: Optional[str] = None) -> str:
     """
     Upload a file to the bucket.
     
     Args:
-        bucket_name: Name of the GCS bucket
-        token: Bearer token for authentication
-        local_file_path: Path to the local file
-        gcs_file_path: Destination path in GCS
+        token: The bearer token for authentication
+        bucket_name: Name of the bucket
+        source_file_path: Path to the local file to upload
+        destination_blob_name: Optional name for the file in the bucket
+                              (if not provided, uses the filename)
         
     Returns:
-        Response from the GCS API
+        The name of the uploaded blob
     """
-    if not os.path.isfile(local_file_path):
-        raise FileNotFoundError(f"File not found: {local_file_path}")
+    client = get_client_with_token(token)
+    bucket = client.bucket(bucket_name)
     
-    # Detect content type
-    content_type, _ = mimetypes.guess_type(local_file_path)
-    if content_type is None:
-        content_type = "application/octet-stream"
+    if destination_blob_name is None:
+        destination_blob_name = os.path.basename(source_file_path)
     
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": content_type
-    }
+    blob = bucket.blob(destination_blob_name)
+    blob.upload_from_filename(source_file_path)
     
-    upload_url = f"https://storage.googleapis.com/upload/storage/v1/b/{bucket_name}"
-    
-    with open(local_file_path, 'rb') as file:
-        file_data = file.read()
-        
-    response = requests.post(
-        f"{upload_url}/o",
-        headers=headers,
-        params={
-            "uploadType": "media",
-            "name": gcs_file_path
-        },
-        data=file_data
-    )
-    
-    if response.status_code in [200, 201]:
-        return response.json()
-    else:
-        raise Exception(f"Failed to upload file: {response.text}")
+    return destination_blob_name
 
-def upload_directory(bucket_name: str, token: str, local_dir_path: str, gcs_base_path: str = "") -> List[Dict]:
+
+def upload_directory(token: str, bucket_name: str, source_dir_path: str, 
+                    destination_prefix: str = '') -> List[str]:
     """
     Upload an entire directory to the bucket.
     
     Args:
-        bucket_name: Name of the GCS bucket
-        token: Bearer token for authentication
-        local_dir_path: Path to the local directory
-        gcs_base_path: Base path in GCS to upload to
+        token: The bearer token for authentication
+        bucket_name: Name of the bucket
+        source_dir_path: Path to the local directory to upload
+        destination_prefix: Optional prefix to add to the uploaded files in the bucket
         
     Returns:
-        List of responses from the GCS API
+        List of uploaded blob names
     """
-    if not os.path.isdir(local_dir_path):
-        raise NotADirectoryError(f"Directory not found: {local_dir_path}")
+    if not os.path.isdir(source_dir_path):
+        raise ValueError(f"Source directory does not exist: {source_dir_path}")
     
-    # Ensure gcs_base_path ends with / if not empty
-    if gcs_base_path and not gcs_base_path.endswith('/'):
-        gcs_base_path += '/'
-        
-    responses = []
+    # Ensure destination prefix ends with a slash if it's not empty
+    if destination_prefix and not destination_prefix.endswith('/'):
+        destination_prefix += '/'
     
-    # Create the base directory if it doesn't exist and isn't empty
-    if gcs_base_path:
-        try:
-            responses.append(create_folder(bucket_name, token, gcs_base_path))
-        except Exception as e:
-            # Ignore if folder already exists
-            pass
+    uploaded_files = []
     
-    # Walk through the directory
-    for root, dirs, files in os.walk(local_dir_path):
-        # Calculate the relative path from the local directory
-        rel_path = os.path.relpath(root, local_dir_path)
-        if rel_path == '.':
-            rel_path = ""
+    # First, find all files in the directory and its subdirectories
+    for root, _, files in os.walk(source_dir_path):
+        for filename in files:
+            local_path = os.path.join(root, filename)
             
-        # Create all subdirectories
-        for dir_name in dirs:
-            if rel_path:
-                gcs_folder_path = f"{gcs_base_path}{rel_path}/{dir_name}/"
-            else:
-                gcs_folder_path = f"{gcs_base_path}{dir_name}/"
-                
-            try:
-                responses.append(create_folder(bucket_name, token, gcs_folder_path))
-            except Exception as e:
-                # Ignore if folder already exists
-                pass
-        
-        # Upload all files
-        for file_name in files:
-            local_file_path = os.path.join(root, file_name)
+            # Determine the relative path from the source directory
+            rel_path = os.path.relpath(local_path, source_dir_path)
             
-            if rel_path:
-                gcs_file_path = f"{gcs_base_path}{rel_path}/{file_name}"
-            else:
-                gcs_file_path = f"{gcs_base_path}{file_name}"
-                
-            try:
-                responses.append(upload_file(bucket_name, token, local_file_path, gcs_file_path))
-            except Exception as e:
-                print(f"Failed to upload {local_file_path}: {str(e)}")
+            # Compute the destination blob name
+            dest_blob_name = os.path.join(destination_prefix, rel_path).replace('\\', '/')
+            
+            # Upload the file
+            uploaded_file = upload_file(token, bucket_name, local_path, dest_blob_name)
+            uploaded_files.append(uploaded_file)
     
-    return responses
+    return uploaded_files
 
-def upload_files_and_directories(bucket_name: str, token: str, path_mapping: List[Dict[str, str]]) -> List[Dict]:
+
+def upload_files_and_directories(token: str, bucket_name: str, 
+                                paths: List[str], destination_prefix: str = '') -> List[str]:
     """
-    Upload multiple files and directories based on a mapping.
+    Upload multiple files or directories to the bucket.
     
     Args:
-        bucket_name: Name of the GCS bucket
-        token: Bearer token for authentication
-        path_mapping: List of dictionaries with 'local_path' and 'gcs_path' keys
+        token: The bearer token for authentication
+        bucket_name: Name of the bucket
+        paths: List of local file or directory paths to upload
+        destination_prefix: Optional prefix to add to the uploaded files in the bucket
         
     Returns:
-        List of responses from the GCS API
+        List of uploaded blob names
     """
-    responses = []
+    if destination_prefix and not destination_prefix.endswith('/'):
+        destination_prefix += '/'
     
-    for mapping in path_mapping:
-        local_path = mapping.get('local_path')
-        gcs_path = mapping.get('gcs_path')
-        
-        if not local_path or not gcs_path:
-            continue
-            
-        if os.path.isfile(local_path):
-            responses.append(upload_file(bucket_name, token, local_path, gcs_path))
-        elif os.path.isdir(local_path):
-            responses.extend(upload_directory(bucket_name, token, local_path, gcs_path))
+    uploaded_files = []
+    
+    for path in paths:
+        if os.path.isfile(path):
+            # It's a file, upload it directly
+            dest_blob_name = os.path.join(destination_prefix, os.path.basename(path)).replace('\\', '/')
+            uploaded_file = upload_file(token, bucket_name, path, dest_blob_name)
+            uploaded_files.append(uploaded_file)
+        elif os.path.isdir(path):
+            # It's a directory, upload its contents
+            dir_name = os.path.basename(path)
+            dir_dest_prefix = os.path.join(destination_prefix, dir_name).replace('\\', '/')
+            uploaded_dir_files = upload_directory(token, bucket_name, path, dir_dest_prefix)
+            uploaded_files.extend(uploaded_dir_files)
         else:
-            print(f"Path not found: {local_path}")
-            
-    return responses
+            raise ValueError(f"Path does not exist: {path}")
+    
+    return uploaded_files
 
-def delete_file(bucket_name: str, token: str, file_path: str) -> bool:
+
+def delete_file(token: str, bucket_name: str, blob_name: str) -> bool:
     """
     Delete a file from the bucket.
     
     Args:
-        bucket_name: Name of the GCS bucket
-        token: Bearer token for authentication
-        file_path: Path to the file in GCS
+        token: The bearer token for authentication
+        bucket_name: Name of the bucket
+        blob_name: Name of the blob to delete
         
     Returns:
-        True if successful, False otherwise
+        True if successful
     """
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
+    client = get_client_with_token(token)
+    bucket = client.bucket(bucket_name)
+    blob = bucket.blob(blob_name)
     
-    base_url = f"https://storage.googleapis.com/storage/v1/b/{bucket_name}"
-    
-    response = requests.delete(
-        f"{base_url}/o/{requests.utils.quote(file_path, safe='')}",
-        headers=headers
-    )
-    
-    return response.status_code in [200, 204]
+    blob.delete()
+    return True
 
-def delete_folder(bucket_name: str, token: str, folder_path: str) -> Dict[str, int]:
+
+def delete_folder(token: str, bucket_name: str, folder_path: str) -> List[str]:
     """
     Delete a folder and all its contents from the bucket.
     
     Args:
-        bucket_name: Name of the GCS bucket
-        token: Bearer token for authentication
-        folder_path: Path to the folder in GCS
+        token: The bearer token for authentication
+        bucket_name: Name of the bucket
+        folder_path: Path to the folder to delete
         
     Returns:
-        Dictionary with counts of successful and failed deletions
+        List of deleted blob names
     """
-    # Ensure folder path ends with /
+    client = get_client_with_token(token)
+    bucket = client.bucket(bucket_name)
+    
+    # Ensure folder path ends with a slash
     if not folder_path.endswith('/'):
         folder_path += '/'
-        
-    # List all objects in the folder
-    objects = list_bucket_contents(bucket_name, token, prefix=folder_path)
     
-    results = {"successful": 0, "failed": 0}
+    # List all blobs in the folder
+    blobs = client.list_blobs(bucket, prefix=folder_path)
+    deleted_blobs = []
     
-    # Delete each object
-    for obj in objects:
-        name = obj.get('name')
-        if delete_file(bucket_name, token, name):
-            results["successful"] += 1
-        else:
-            results["failed"] += 1
-            
-    return results
+    # Delete each blob
+    for blob in blobs:
+        blob.delete()
+        deleted_blobs.append(blob.name)
+    
+    return deleted_blobs
 
 
-# Example usage
-if __name__ == "__main__":
-    import os
-    from google.oauth2 import service_account
-    
-    # Example of how to get a token from service account
-    def get_bearer_token_from_service_account(service_account_file: str) -> str:
-        credentials = service_account.Credentials.from_service_account_file(
-            service_account_file,
-            scopes=['https://www.googleapis.com/auth/cloud-platform']
-        )
-        credentials.refresh(requests.Request())
-        return credentials.token
-    
-    # This is just an example - you should get your token using appropriate method
-    # token = get_bearer_token_from_service_account('path/to/service-account.json')
-    token = "YOUR_BEARER_TOKEN"
-    bucket_name = "your-bucket-name"
-    
-    # 1. List bucket contents
-    contents = list_bucket_contents(bucket_name, token)
-    print(f"Bucket contents: {len(contents)} items")
-    
-    # 2. List folder contents
-    folder_contents = list_folder_contents(bucket_name, token, "my-folder/")
-    print(f"Folder contents: {len(folder_contents)} items")
-    
-    # 3. Create folder
-    new_folder = create_folder(bucket_name, token, "test/new-folder/")
-    print(f"Created folder: {new_folder.get('name')}")
-    
-    # 4. Upload file
-    upload_result = upload_file(bucket_name, token, "local-file.txt", "test/new-folder/file.txt")
-    print(f"Uploaded file: {upload_result.get('name')}")
-    
-    # 5. Upload directory
-    dir_results = upload_directory(bucket_name, token, "local-directory", "test/new-directory")
-    print(f"Uploaded directory: {len(dir_results)} items")
-    
-    # 6. Upload multiple files/directories
-    path_mapping = [
-        {"local_path": "file1.txt", "gcs_path": "uploads/file1.txt"},
-        {"local_path": "images/", "gcs_path": "uploads/images"}
-    ]
-    multi_results = upload_files_and_directories(bucket_name, token, path_mapping)
-    print(f"Multi upload results: {len(multi_results)} items")
-    
-    # 7. Delete file
-    delete_result = delete_file(bucket_name, token, "test/new-folder/file.txt")
-    print(f"File deleted: {delete_result}")
-    
-    # 8. Delete folder
-    folder_delete = delete_folder(bucket_name, token, "test/new-folder/")
-    print(f"Folder deletion: {folder_delete}")
+# Example usage (commented out)
+"""
+# Authentication token
+bearer_token = "your_bearer_token_here"
+
+# Bucket name
+bucket_name = "your-bucket-name"
+
+# List all contents in the bucket
+all_items = list_bucket_contents(bearer_token, bucket_name)
+print(f"All items in bucket: {all_items}")
+
+# List contents of a specific folder
+folder_items = list_folder_contents(bearer_token, bucket_name, "my-folder")
+print(f"Items in my-folder: {folder_items}")
+
+# Create a new folder
+create_folder(bearer_token, bucket_name, "new-folder")
+print("Created new folder: new-folder/")
+
+# Upload a single file
+uploaded_file = upload_file(bearer_token, bucket_name, "local-file.txt", "remote-file.txt")
+print(f"Uploaded file: {uploaded_file}")
+
+# Upload an entire directory
+uploaded_dir_files = upload_directory(bearer_token, bucket_name, "local-directory", "remote-directory")
+print(f"Uploaded directory files: {uploaded_dir_files}")
+
+# Upload mixed files and directories
+paths_to_upload = ["file1.txt", "file2.jpg", "directory1", "directory2"]
+uploaded_items = upload_files_and_directories(bearer_token, bucket_name, paths_to_upload, "uploads")
+print(f"Uploaded items: {uploaded_items}")
+
+# Delete a file
+delete_file(bearer_token, bucket_name, "remote-file.txt")
+print("Deleted file: remote-file.txt")
+
+# Delete a folder
+deleted_items = delete_folder(bearer_token, bucket_name, "folder-to-delete")
+print(f"Deleted folder items: {deleted_items}")
+"""
